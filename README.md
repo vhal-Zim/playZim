@@ -1,44 +1,41 @@
 # ytaudio
 
-Reproductor de audio de YouTube para la terminal. Busca o pega una URL, y
-reproduce solo el audio (sin video) directamente en tu terminal, con una
-interfaz interactiva (TUI), biblioteca persistente, cola, caché offline y
-soporte de teclas multimedia del sistema.
+A terminal YouTube audio player. Search or paste a URL and play just the
+audio (no video) right in your terminal, with an interactive TUI, a
+persistent library, a queue, offline caching, and system media-key support.
 
-## Características
+## Features
 
-- **Interfaz interactiva (Textual)**: controles de reproducción, biblioteca,
-  cola y ecualizador animado, todo desde el teclado.
-- **Biblioteca automática**: cada pista reproducida se guarda con su título,
-  autor y contador de reproducciones — se puede volver a elegir después.
-- **Cola con shuffle y repeat** (apagado / una pista / toda la cola).
-- **Historial** de reproducciones, separado de la biblioteca curada.
-- **Caché offline**: la primera vez se transmite en streaming; en segundo
-  plano se descarga el audio para que la próxima reproducción sea instantánea
-  y sin red.
-- **Teclas multimedia / MPRIS**: integración best-effort con el bus de
-  sesión D-Bus del escritorio (play/pausa/siguiente desde el teclado del
-  sistema). Si D-Bus no está disponible, se desactiva en silencio sin afectar
-  el resto de la app.
-- **Modo clásico (`--legacy`)**: el comportamiento original de una sola
-  pieza (mpv controla la terminal directamente), por si preferís ese flujo o
-  lo necesitás en un script.
+- **Interactive TUI (Textual)**: playback controls, library, queue, and an
+  animated equalizer, all from the keyboard.
+- **Automatic library**: every track you play is saved with its title,
+  uploader, and play count — pick it again later.
+- **Queue with shuffle and repeat** (off / one track / whole queue).
+- **History** of played tracks, kept separate from the curated library.
+- **Offline cache**: the first playback streams live; a background download
+  caches the audio so the next playback is instant and network-free.
+- **Media keys / MPRIS**: best-effort integration with the desktop session
+  D-Bus (play/pause/next from your system's media keys). If D-Bus isn't
+  available, it silently disables itself without affecting anything else.
+- **Classic mode (`--legacy`)**: the original single-file behavior (mpv
+  takes over the terminal directly), in case you prefer that flow or need it
+  in a script.
 
-## Requisitos
+## Requirements
 
 - Python 3.10+
-- [`mpv`](https://mpv.io/) y `ffmpeg` instalados en el sistema
-- Linux con D-Bus de sesión disponible (opcional, solo para MPRIS)
+- [`mpv`](https://mpv.io/) and `ffmpeg` installed on the system
+- Linux with a session D-Bus available (optional, only needed for MPRIS)
 
-No hace falta `sudo` para nada de lo anterior más allá de `mpv`/`ffmpeg`, que
-seguramente ya tenés instalados. Todas las dependencias de Python (Textual,
-`dbus-next`, `yt-dlp`) se instalan en un entorno virtual propio del proyecto.
+No `sudo` is required beyond `mpv`/`ffmpeg`, which you likely already have.
+All Python dependencies (Textual, `dbus-next`, `yt-dlp`) are installed into
+the project's own virtual environment.
 
-## Instalación
+## Installation
 
 ```bash
-git clone <url-de-este-repo>
-cd ytaudio  # o el nombre que le hayas dado al repo
+git clone git@github.com:vhal-Zim/playZim.git
+cd playZim
 
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
@@ -47,75 +44,76 @@ python3 -m venv .venv
 ./install.sh
 ```
 
-`install.sh` crea el comando `ytaudio` en `~/.local/bin` (agregalo a tu
-`PATH` si el script te lo indica). Internamente el comando usa siempre el
-Python del `.venv` del proyecto, así que no hace falta activarlo a mano.
+`install.sh` creates the `ytaudio` command in `~/.local/bin` (add it to your
+`PATH` if the script tells you to). The command always runs through the
+project's `.venv` Python internally, so there's no need to activate it
+manually.
 
-Para actualizar `yt-dlp` cuando YouTube cambie algo y deje de funcionar:
+To update `yt-dlp` whenever YouTube changes something and playback breaks:
 
 ```bash
 .venv/bin/pip install --upgrade yt-dlp
 ```
 
-## Uso
+## Usage
 
 ```bash
-ytaudio                      # abre la TUI vacía (biblioteca/cola/búsqueda)
-ytaudio "lofi hip hop"       # abre la TUI y reproduce esa búsqueda al instante
-ytaudio "https://youtube.com/watch?v=..."   # también acepta URLs directas
-ytaudio --volume 80 "consulta"              # volumen inicial
-ytaudio --legacy "consulta o URL"           # modo clásico, sin TUI
+ytaudio                      # opens the empty TUI (library/queue/search)
+ytaudio "lofi hip hop"       # opens the TUI and plays that search right away
+ytaudio "https://youtube.com/watch?v=..."   # direct URLs work too
+ytaudio --volume 80 "query"                 # initial volume
+ytaudio --legacy "query or URL"             # classic mode, no TUI
 ```
 
-### Controles (TUI)
+### Controls (TUI)
 
-| Tecla       | Acción                                   |
+| Key         | Action                                   |
 |-------------|-------------------------------------------|
-| `espacio`   | Pausar / reanudar                          |
-| `]` / `[`   | Pista siguiente / anterior                 |
-| `+` / `-`   | Subir / bajar volumen                      |
-| `s`         | Shuffle on/off                             |
-| `e`         | Ciclar repeat (apagado → una → toda)       |
-| `f`         | Buscar en YouTube                          |
-| `1` / `2` / `3` | Biblioteca / Cola / Historial           |
-| `q`         | Salir                                      |
+| `space`     | Play / pause                               |
+| `]` / `[`   | Next / previous track                      |
+| `+` / `-`   | Volume up / down                           |
+| `s`         | Toggle shuffle                             |
+| `e`         | Cycle repeat (off → one → all)             |
+| `f`         | Search YouTube                             |
+| `1` / `2` / `3` | Library / Queue / History               |
+| `q`         | Quit                                       |
 
-Dentro de cada pestaña:
+Within each tab:
 
-| Pestaña     | Tecla | Acción                          |
-|-------------|-------|----------------------------------|
-| Biblioteca  | `a`   | Encolar pista seleccionada       |
-| Biblioteca  | `d`   | Borrar de la biblioteca           |
-| Biblioteca  | `r`   | Renombrar                        |
-| Cola        | `d`   | Quitar de la cola                |
-| Cola        | `c`   | Vaciar la cola                   |
-| Búsqueda (`f`) | `a` | Encolar sin reproducir de inmediato |
+| Tab          | Key | Action                            |
+|--------------|-----|-------------------------------------|
+| Library      | `a` | Enqueue selected track              |
+| Library      | `d` | Remove from library                 |
+| Library      | `r` | Rename                              |
+| Queue        | `d` | Remove from queue                   |
+| Queue        | `c` | Clear the queue                     |
+| Search (`f`) | `a` | Enqueue without playing immediately |
 
-`Enter` reproduce la pista seleccionada en cualquiera de las listas
-(biblioteca, cola, historial, resultados de búsqueda).
+`Enter` plays the selected track in any of the lists (library, queue,
+history, search results).
 
-## Dónde guarda sus datos
+## Where it stores data
 
-- Biblioteca, historial y configuración: `~/.config/ytaudio/`
-- Audio descargado (caché offline): `~/.cache/ytaudio/`
+- Library, history, and settings: `~/.config/ytaudio/`
+- Downloaded audio (offline cache): `~/.cache/ytaudio/`
 
-Ambas carpetas son propias del usuario, no viven dentro del repo.
+Both folders are user-specific and don't live inside the repo.
 
-## Estructura del proyecto
+## Project structure
 
 ```
-ytaudio.py        # script original de una sola pieza (usado por --legacy)
-install.sh        # instala el comando `ytaudio` en ~/.local/bin
+ytaudio.py        # original single-file script (used by --legacy)
+install.sh        # installs the `ytaudio` command into ~/.local/bin
 ytaudio/
-  models.py        # tipos compartidos (Track, PlayerStatus, etc.)
-  config.py        # rutas XDG y configuración persistente
-  resolver.py       # búsqueda/resolución/descarga vía yt-dlp
-  library.py        # biblioteca curada (JSON)
-  history.py        # historial de reproducción (JSON)
-  cache.py          # caché offline de audio
-  player.py         # motor de reproducción (mpv headless + socket JSON-IPC)
-  mpris.py          # integración con teclas multimedia (D-Bus)
-  visualizer.py      # ecualizador animado (widget Textual)
-  tui.py            # interfaz interactiva (Textual App)
-  cli.py            # punto de entrada / argparse
+  models.py        # shared types (Track, PlayerStatus, etc.)
+  config.py        # XDG paths and persistent settings
+  resolver.py       # search/resolve/download via yt-dlp
+  library.py        # curated library (JSON)
+  history.py        # playback history (JSON)
+  cache.py          # offline audio cache
+  player.py         # playback engine (headless mpv + JSON-IPC socket)
+  mpris.py          # media-key integration (D-Bus)
+  visualizer.py      # animated equalizer (Textual widget)
+  tui.py            # interactive interface (Textual App)
+  cli.py            # entry point / argparse
 ```
