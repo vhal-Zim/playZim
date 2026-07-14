@@ -9,7 +9,18 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Input, Label, ListItem, ListView, Static, TabbedContent, TabPane
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    ProgressBar,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 
 from ytaudio import resolver
 from ytaudio.cache import AudioCache
@@ -297,6 +308,7 @@ class YtAudioApp(App):
     TITLE = "ytaudio"
     CSS = """
     #now-playing { height: 3; content-align: center middle; }
+    #progress { width: 1fr; margin: 0 2; }
     TabbedContent { height: 1fr; }
     """
     BINDINGS = [
@@ -333,6 +345,7 @@ class YtAudioApp(App):
     def compose(self) -> ComposeResult:
         yield EqualizerWidget(id="eq")
         yield Static("Nada reproduciéndose todavía. Presioná 'f' para buscar.", id="now-playing")
+        yield ProgressBar(id="progress", show_percentage=False, show_eta=False)
         with TabbedContent(initial="lib"):
             with TabPane("Biblioteca (1)", id="lib"):
                 yield LibraryPane()
@@ -376,6 +389,9 @@ class YtAudioApp(App):
                 f"{icon} {status.track.title}  [{fmt_time(status.position)}/{fmt_time(status.duration)}]"
                 f"  Vol:{status.volume}  {shuffle_icon}{repeat_icon}"
             )
+
+        progress_bar = self.query_one("#progress", ProgressBar)
+        progress_bar.update(total=status.duration, progress=status.position)
 
         try:
             await self.query_one(QueuePane).refresh_list()
