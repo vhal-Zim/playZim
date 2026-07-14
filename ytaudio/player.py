@@ -29,7 +29,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ytaudio.config import MPV_SOCKET
+from ytaudio.audiocap import AudioLevelCapture
+from ytaudio.config import AUDIO_CLIENT_NAME, MPV_SOCKET
 from ytaudio.models import PlaybackState, PlayerStatus, RepeatMode, Track
 
 
@@ -98,6 +99,7 @@ class _MpvIPC:
                 "--no-video",
                 "--no-input-terminal",
                 f"--input-ipc-server={self._socket_path}",
+                f"--audio-client-name={AUDIO_CLIENT_NAME}",
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -311,10 +313,30 @@ class PlayerEngine:
 
         self._ipc: Optional[_MpvIPC] = None
 
+        self._level_listeners: list[Callable[[list], None]] = []
+        self._level_capture = AudioLevelCapture(AUDIO_CLIENT_NAME, on_levels=self._dispatch_levels)
+
     # -- observers ---------------------------------------------------------
 
     def add_observer(self, obs: Any) -> None:
         self._observers.append(obs)
+
+    def add_level_listener(self, callback: Callable[[list], None]) -> None:
+        """Registra un callback para niveles de audio reales por banda (0.0-1.0).
+
+        Se llama desde el hilo lector de `audiocap.py` (no el hilo principal
+        ni ningún loop de asyncio) — quien se suscriba debe marshalear de
+        vuelta a su propio hilo/loop si hace falta (igual que hace
+        `mpris.py` con `call_soon_threadsafe`).
+        """
+        self._level_listeners.append(callback)
+
+    def _dispatch_levels(self, levels: list) -> None:
+        for cb in list(self._level_listeners):
+            try:
+                cb(levels)
+            except Exception as exc:  # noqa: BLE001 - herramienta personal
+                _log(f"level_listener falló: {exc}")
 
     def _notify_status(self) -> None:
         status = self.status
@@ -342,6 +364,9 @@ class PlayerEngine:
             self._ipc.set_property("volume", self._volume)
         except MpvIPCError as exc:
             _log(f"no se pudo aplicar el volumen inicial: {exc}")
+
+        if not self._level_capture.is_running():
+            self._level_capture.start()  # best-effort: no-op si pw-record no está
 
     # -- cola ---------------------------------------------------------------
 
@@ -373,8 +398,21 @@ class PlayerEngine:
         actual y se reproduce, dejando la cola visible intacta. Si no está,
         se inserta una entrada nueva al frente de la cola. Esto evita que
         `enqueue(t); play_now(t)` deje `t` dos veces en la cola.
+
+        Si `track` es la que YA está sonando (mismo id, estado
+        PLAYING/PAUSED), no se recarga desde 0 — un click/Enter repetido
+        sobre la fila actual no debe reiniciar la posición. Si estaba en
+        pausa, reanuda (comportamiento esperable al re-seleccionarla,
+        similar a la mayoría de reproductores); si ya estaba sonando, es
+        no-op. Para reiniciar la posición explícitamente, ver
+        `restart_current()`.
         """
         with self._lock:
+            already_current = (
+                self._current_track is not None
+                and self._current_track.id == track.id
+                and self._state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
+            )
             existing_idx = next((i for i, t in enumerate(self._queue) if t.id == track.id), None)
             if existing_idx is not None:
                 queue_idx = existing_idx
@@ -391,7 +429,23 @@ class PlayerEngine:
                 pos_in_order = 0
                 self._order.insert(0, queue_idx)
             self._pos = pos_in_order
+
+        if already_current:
+            if self._state == PlaybackState.PAUSED:
+                self.toggle_pause()
+            return
         self._load_and_play(queue_idx)
+
+    def restart_current(self) -> None:
+        """Vuelve la posición de la pista actual a 0, sin recargar el archivo."""
+        with self._lock:
+            track = self._current_track
+        if track is None or self._ipc is None:
+            return
+        try:
+            self._ipc.command("seek", 0, "absolute")
+        except MpvIPCError as exc:
+            _log(f"fallo al reiniciar la pista actual: {exc}")
 
     def remove_from_queue(self, index: int) -> None:
         with self._lock:
@@ -685,6 +739,7 @@ class PlayerEngine:
     # -- apagado ---------------------------------------------------------------
 
     def shutdown(self) -> None:
+        self._level_capture.stop()
         if self._ipc is not None:
             self._ipc.close()
             self._ipc = None

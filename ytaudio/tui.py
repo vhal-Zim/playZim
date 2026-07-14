@@ -7,7 +7,8 @@ from typing import Optional
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Center, Vertical
+from textual.coordinate import Coordinate
 from textual.screen import ModalScreen
 from textual.widgets import (
     DataTable,
@@ -152,7 +153,12 @@ class LibraryPane(Vertical):
         Binding("a", "enqueue_selected", "Encolar"),
         Binding("d", "delete_selected", "Borrar"),
         Binding("r", "rename_selected", "Renombrar"),
+        Binding("escape", "unfocus_filter", "Cerrar filtro", show=False),
     ]
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._last_signature: Optional[tuple] = None
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="Filtrar biblioteca...", id="lib-filter")
@@ -162,7 +168,43 @@ class LibraryPane(Vertical):
 
     def on_mount(self) -> None:
         self.refresh_table()
+        self._last_signature = self._current_signature()
         self.query_one("#lib-table", DataTable).focus()
+
+    def _current_signature(self) -> tuple:
+        return tuple((e.track.id, e.play_count, e.last_played_at) for e in self.app.library.all())
+
+    def refresh_if_changed(self) -> None:
+        """Refresca la tabla SOLO si la biblioteca cambió desde el último chequeo.
+
+        Se llama en cada tick del poll de estado (cada 0.5s) para que una
+        pista reproducida desde otro lado (ej. Buscar con 'f') aparezca sin
+        acción manual — pero solo reconstruye la tabla cuando algo cambió
+        de verdad, preservando la fila seleccionada por id de pista (no por
+        índice, ya que el orden puede cambiar al reordenar por
+        last_played_at).
+        """
+        signature = self._current_signature()
+        if signature == self._last_signature:
+            return
+        self._last_signature = signature
+
+        table = self.query_one("#lib-table", DataTable)
+        selected_id = None
+        if table.row_count and table.cursor_row is not None:
+            try:
+                selected_id = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            except Exception:  # noqa: BLE001 - herramienta personal
+                selected_id = None
+
+        self.refresh_table(self.query_one("#lib-filter", Input).value)
+
+        if selected_id is not None:
+            try:
+                row_index = table.get_row_index(selected_id)
+                table.cursor_coordinate = Coordinate(row_index, table.cursor_coordinate.column)
+            except Exception:  # noqa: BLE001 - la fila puede haber sido borrada
+                pass
 
     def refresh_table(self, query: str = "") -> None:
         table = self.query_one("#lib-table", DataTable)
@@ -206,6 +248,7 @@ class LibraryPane(Vertical):
         if track:
             self.app.library.remove(track.id)
             self.refresh_table(self.query_one("#lib-filter", Input).value)
+            self._last_signature = self._current_signature()
 
     def action_rename_selected(self) -> None:
         track = self._selected_track()
@@ -216,8 +259,12 @@ class LibraryPane(Vertical):
             if new_title:
                 self.app.library.rename(track.id, new_title)
                 self.refresh_table(self.query_one("#lib-filter", Input).value)
+                self._last_signature = self._current_signature()
 
         self.app.push_screen(RenameScreen(track.title), _apply)
+
+    def action_unfocus_filter(self) -> None:
+        self.query_one("#lib-table", DataTable).focus()
 
 
 class QueuePane(Vertical):
@@ -277,12 +324,35 @@ class QueuePane(Vertical):
 
 
 class HistoryPane(Vertical):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._last_signature: Optional[tuple] = None
+
     def compose(self) -> ComposeResult:
         table = DataTable(id="hist-table", cursor_type="row")
         table.add_columns("Título", "Autor", "Reproducido")
         yield table
 
     def on_mount(self) -> None:
+        self.refresh_table()
+        self._last_signature = self._current_signature()
+
+    def _current_signature(self) -> tuple:
+        return tuple(e.played_at for e in self.app.history.recent(100))
+
+    def refresh_if_changed(self) -> None:
+        """Refresca SOLO si el historial cambió (mismo patrón que Library/Queue).
+
+        Sin esto, `refresh_table()` solo se llamaba una vez en `on_mount` —
+        si la pestaña se monta antes de que se reproduzca algo (lo más
+        común, ya que TabbedContent monta sus tres pestañas al arrancar),
+        el historial quedaba vacío para siempre sin importar cuánto se
+        reprodujera después.
+        """
+        signature = self._current_signature()
+        if signature == self._last_signature:
+            return
+        self._last_signature = signature
         self.refresh_table()
 
     def refresh_table(self) -> None:
@@ -307,8 +377,10 @@ class HistoryPane(Vertical):
 class YtAudioApp(App):
     TITLE = "ytaudio"
     CSS = """
-    #now-playing { height: 3; content-align: center middle; }
-    #progress { width: 1fr; margin: 0 2; }
+    #now-playing-panel { align: center middle; height: auto; padding: 1 0; }
+    #eq { width: 40; }
+    #now-playing { height: 3; content-align: center middle; width: auto; }
+    #progress { width: 50; margin: 0; }
     TabbedContent { height: 1fr; }
     """
     BINDINGS = [
@@ -320,6 +392,7 @@ class YtAudioApp(App):
         Binding("-", "vol_down", "Vol-"),
         Binding("s", "toggle_shuffle", "Shuffle"),
         Binding("e", "cycle_repeat", "Repeat"),
+        Binding("0", "restart_track", "Reiniciar"),
         Binding("f", "open_search", "Buscar"),
         Binding("1", "show_tab('lib')", "Biblioteca"),
         Binding("2", "show_tab('queue')", "Cola"),
@@ -343,9 +416,13 @@ class YtAudioApp(App):
         self._mpris: Optional[MprisService] = None
 
     def compose(self) -> ComposeResult:
-        yield EqualizerWidget(id="eq")
-        yield Static("Nada reproduciéndose todavía. Presioná 'f' para buscar.", id="now-playing")
-        yield ProgressBar(id="progress", show_percentage=False, show_eta=False)
+        with Vertical(id="now-playing-panel"):
+            with Center():
+                yield EqualizerWidget(id="eq")
+            with Center():
+                yield Static("Nada reproduciéndose todavía. Presioná 'f' para buscar.", id="now-playing")
+            with Center():
+                yield ProgressBar(id="progress", show_percentage=False, show_eta=False)
         with TabbedContent(initial="lib"):
             with TabPane("Biblioteca (1)", id="lib"):
                 yield LibraryPane()
@@ -359,9 +436,25 @@ class YtAudioApp(App):
         self.set_interval(0.5, self._poll_status)
         self._mpris = MprisService(self.engine)
         await self._mpris.start()  # best-effort, nunca lanza
+        self.engine.add_level_listener(self._on_audio_levels)
 
         if self._initial_query:
             self.run_worker(self._play_initial_query(self._initial_query), exclusive=True)
+
+    def _on_audio_levels(self, levels: list) -> None:
+        # Se llama desde el hilo lector de audiocap.py, no desde el loop de
+        # Textual — hay que marshalear con call_from_thread antes de tocar
+        # cualquier widget (mismo patrón que usa mpris.py con su propio loop).
+        try:
+            self.call_from_thread(self._apply_audio_levels, levels)
+        except Exception:  # noqa: BLE001 - la app puede estar cerrándose
+            pass
+
+    def _apply_audio_levels(self, levels: list) -> None:
+        try:
+            self.query_one("#eq", EqualizerWidget).set_levels(levels)
+        except Exception:  # noqa: BLE001 - el widget puede no estar montado aún
+            pass
 
     async def _play_initial_query(self, query: str) -> None:
         self.query_one("#now-playing", Static).update(f"Resolviendo: {query}...")
@@ -398,6 +491,16 @@ class YtAudioApp(App):
         except Exception:  # noqa: BLE001 - el panel puede no estar montado aún
             pass
 
+        try:
+            self.query_one(LibraryPane).refresh_if_changed()
+        except Exception:  # noqa: BLE001 - el panel puede no estar montado aún
+            pass
+
+        try:
+            self.query_one(HistoryPane).refresh_if_changed()
+        except Exception:  # noqa: BLE001 - el panel puede no estar montado aún
+            pass
+
     # -- acciones globales --------------------------------------------------
 
     def action_toggle_pause(self) -> None:
@@ -423,6 +526,9 @@ class YtAudioApp(App):
         current = self.engine.status.repeat
         nxt = order[(order.index(current) + 1) % len(order)]
         self.engine.set_repeat(nxt)
+
+    def action_restart_track(self) -> None:
+        self.engine.restart_current()
 
     def action_open_search(self) -> None:
         self.push_screen(SearchScreen())

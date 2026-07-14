@@ -22,6 +22,12 @@ CACHE_AUDIO_DIR = CACHE_DIR / "audio"
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
 MPV_SOCKET = RUNTIME_DIR / "ytaudio-mpv.sock"
 
+# Nombre de cliente PipeWire único por proceso: permite que audiocap.py
+# capture exactamente el stream de audio de ESTA instancia de mpv (via
+# `pw-record --target`), sin mezclar audio de otras apps ni de otra
+# instancia de ytaudio corriendo en paralelo.
+AUDIO_CLIENT_NAME = f"ytaudio-mpv-{os.getpid()}"
+
 
 def ensure_dirs() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
