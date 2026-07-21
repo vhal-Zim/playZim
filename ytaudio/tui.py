@@ -156,6 +156,14 @@ class LibraryPane(Vertical):
         Binding("escape", "unfocus_filter", "Cerrar filtro", show=False),
     ]
 
+    DEFAULT_CSS = """
+    LibraryPane > DataTable {
+        scrollbar-color: $primary;
+        scrollbar-color-hover: $primary-lighten-1;
+        scrollbar-color-active: $primary-lighten-2;
+    }
+    """
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._last_signature: Optional[tuple] = None
