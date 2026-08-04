@@ -161,6 +161,7 @@ class LibraryPane(Vertical):
         scrollbar-color: $primary;
         scrollbar-color-hover: $primary-lighten-1;
         scrollbar-color-active: $primary-lighten-2;
+        height: 1fr;
     }
     """
 
@@ -332,6 +333,12 @@ class QueuePane(Vertical):
 
 
 class HistoryPane(Vertical):
+    DEFAULT_CSS = """
+    HistoryPane > DataTable {
+        height: 1fr;
+    }
+    """
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._last_signature: Optional[tuple] = None

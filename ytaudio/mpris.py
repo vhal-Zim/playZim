@@ -171,6 +171,13 @@ if _DBUS_NEXT_IMPORT_ERROR is None:
             return "ytaudio"
 
         @dbus_property(access=PropertyAccess.READ)
+        def DesktopEntry(self) -> "s":
+            # Sin .desktop file real (app de terminal) — algunos shells de
+            # escritorio consultan esta propiedad igual; string vacío evita
+            # el error de "propiedad desconocida" en sus logs.
+            return ""
+
+        @dbus_property(access=PropertyAccess.READ)
         def SupportedUriSchemes(self) -> "as":
             return []
 
