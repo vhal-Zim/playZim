@@ -313,6 +313,11 @@ class PlayerEngine:
 
         self._ipc: Optional[_MpvIPC] = None
 
+        # Ids de track para los que ya se intentó el fallback de descarga
+        # tras un fallo de streaming en esta sesión — evita reintentar en
+        # bucle si la descarga también falla (ver _retry_with_download).
+        self._fallback_attempted: set = set()
+
         self._level_listeners: list[Callable[[list], None]] = []
         self._level_capture = AudioLevelCapture(AUDIO_CLIENT_NAME, on_levels=self._dispatch_levels)
 
@@ -731,10 +736,49 @@ class PlayerEngine:
             if reason == "eof":
                 self._advance(auto=True)
             elif reason == "error":
-                _log(f"error de mpv reproduciendo el archivo: {msg.get('file_error', 'desconocido')}")
-                self._advance(auto=True)
+                with self._lock:
+                    failed_track = self._pending_start_track
+                if failed_track is not None and failed_track.id not in self._fallback_attempted:
+                    # Streaming directo falló ANTES de que la pista llegara a
+                    # sonar (nunca llegó "file-loaded" para este intento) —
+                    # típico de videos donde YouTube firma la URL para un
+                    # cliente/headers que el fetcher HTTP de mpv no replica
+                    # (403 al abrir, aunque yt-dlp resolvió bien la URL).
+                    # Reintentamos UNA vez descargando el archivo entero vía
+                    # yt-dlp (que sí maneja esto correctamente de punta a
+                    # punta) y reproduciendo desde el archivo local.
+                    self._fallback_attempted.add(failed_track.id)
+                    _log(f"streaming falló para '{failed_track.title}', reintentando con descarga local...")
+                    self._retry_with_download(failed_track)
+                else:
+                    _log(f"error de mpv reproduciendo el archivo: {msg.get('file_error', 'desconocido')}")
+                    with self._lock:
+                        self._pending_start_track = None
+                    self._advance(auto=True)
             # "stop"/"quit": ya manejamos el estado nosotros mismos.
             return
+
+    def _retry_with_download(self, track: Track) -> None:
+        def _on_done(t: Track, local_path: Path) -> None:
+            if self._ipc is None:
+                return
+            with self._lock:
+                self._pending_start_track = t
+            try:
+                self._ipc.command("loadfile", str(local_path), "replace")
+            except MpvIPCError as exc:
+                _log(f"fallo al cargar el archivo de respaldo para '{t.title}': {exc}")
+                with self._lock:
+                    self._pending_start_track = None
+                self._advance(auto=True)
+
+        def _on_error(t: Track, exc: Exception) -> None:
+            _log(f"la descarga de respaldo también falló para '{t.title}': {exc}")
+            with self._lock:
+                self._pending_start_track = None
+            self._advance(auto=True)
+
+        self._cache.ensure_cached_async(track, on_done=_on_done, on_error=_on_error)
 
     # -- apagado ---------------------------------------------------------------
 

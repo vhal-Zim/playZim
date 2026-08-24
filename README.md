@@ -26,10 +26,50 @@ persistent library, a queue, offline caching, and system media-key support.
 - Python 3.10+
 - [`mpv`](https://mpv.io/) and `ffmpeg` installed on the system
 - Linux with a session D-Bus available (optional, only needed for MPRIS)
+- PipeWire with `pw-record` on `PATH` (optional, only needed for the real
+  audio-reactive equalizer — without it, the equalizer just runs a
+  simulated animation instead)
+- [`deno`](https://deno.com/) on `PATH` (optional, recommended): yt-dlp uses
+  it to solve YouTube's JavaScript signature challenges. Without it, some
+  videos may fail to resolve at all.
 
-No `sudo` is required beyond `mpv`/`ffmpeg`, which you likely already have.
-All Python dependencies (Textual, `dbus-next`, `yt-dlp`) are installed into
-the project's own virtual environment.
+No `sudo` is required beyond the above, which you likely already have.
+All Python dependencies (Textual, `dbus-next`, `yt-dlp`, `numpy`) are
+installed into the project's own virtual environment.
+
+### Playback reliability fallbacks
+
+YouTube increasingly blocks automated audio/video extraction for certain
+content (mainly official/licensed music) unless the request looks like it
+comes from a real browser. To keep the tool working out-of-the-box for
+anyone who clones this repo — desktop machine or bare headless server alike
+— the offline-cache download path (`ytaudio/resolver.py`) tries
+progressively harder on failure, entirely automatically:
+
+1. Plain download, no cookies, default client (fast, works for the large
+   majority of videos).
+2. If that's rejected, it retries with a couple of alternative YouTube
+   "player clients" that yt-dlp supports (`tv`, `android`, `ios`, `web`).
+   These need no browser and no cookies at all, so they're what kicks in on
+   a machine with no browser installed (a server, a container, etc.).
+3. If that's still not enough, it retries using the session cookies of any
+   browser it finds actually installed on your machine (Chrome, Firefox,
+   Edge, Chromium, Brave, Opera, Vivaldi, Safari, Whale — tried in that
+   order). Browsers that aren't installed, or aren't logged into YouTube,
+   fail that check almost instantly and it just moves on to the next one.
+4. Whichever strategy works gets remembered for the rest of the session, so
+   later downloads don't re-pay the cost of retrying the ones that failed.
+
+This never sends your data anywhere beyond the normal yt-dlp/YouTube
+request, and step 3 only ever reads your own local browser's existing
+session. It's all best-effort — some official/licensed content is currently
+blocked by YouTube's anti-bot measures hard enough that none of this gets
+through. If you hit that often and don't mind running one extra local
+service, the most reliable fix right now is a PO-token provider such as
+[bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+(run via Docker) — install its yt-dlp plugin
+(`pip install bgutil-ytdlp-pot-provider`) and start its server; yt-dlp will
+pick it up automatically with no other configuration.
 
 ## Installation
 
@@ -39,7 +79,7 @@ cd playZim
 
 python3 -m venv .venv
 .venv/bin/pip install --upgrade pip
-.venv/bin/pip install textual dbus-next yt-dlp
+.venv/bin/pip install textual dbus-next yt-dlp numpy
 
 ./install.sh
 ```

@@ -83,11 +83,14 @@ class AudioCache:
         self,
         track: Track,
         on_done: Optional[Callable[[Track, Path], None]] = None,
+        on_error: Optional[Callable[[Track, Exception], None]] = None,
     ) -> None:
         """Lanza una descarga en background si `track` no está cacheada aún.
 
-        No bloquea. Los errores de descarga se loguean a stderr y no
-        propagan al hilo principal.
+        No bloquea. Los errores de descarga se loguean a stderr y, si se
+        pasó `on_error`, también se entregan ahí (además del log) para que
+        el llamador pueda reaccionar (ej. reintentar o avisar al usuario)
+        en vez de quedarse esperando un `on_done` que nunca llega.
         """
         if self.get_local_path(track) is not None:
             return
@@ -97,6 +100,11 @@ class AudioCache:
                 local_path = self._download(track)
             except Exception as exc:  # noqa: BLE001 - herramienta personal
                 print(f"[ytaudio.cache] fallo al descargar '{track.title}' ({track.id}): {exc}", file=sys.stderr)
+                if on_error is not None:
+                    try:
+                        on_error(track, exc)
+                    except Exception as cb_exc:  # noqa: BLE001
+                        print(f"[ytaudio.cache] fallo en on_error para {track.id}: {cb_exc}", file=sys.stderr)
                 return
             if on_done is not None:
                 try:
