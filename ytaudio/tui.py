@@ -5,19 +5,19 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Vertical
+from textual.containers import Horizontal, Vertical
 from textual.coordinate import Coordinate
+from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import (
     DataTable,
-    Footer,
     Input,
     Label,
     ListItem,
     ListView,
-    ProgressBar,
     Static,
     TabbedContent,
     TabPane,
@@ -28,10 +28,24 @@ from ytaudio.cache import AudioCache
 from ytaudio.config import ensure_dirs, load_settings, save_settings
 from ytaudio.history import History
 from ytaudio.library import Library
-from ytaudio.models import PlaybackState, RepeatMode, Track
+from ytaudio.models import PlaybackState, PlayerStatus, RepeatMode, Track
 from ytaudio.mpris import MprisService
 from ytaudio.player import PlayerEngine
 from ytaudio.visualizer import EqualizerWidget
+
+# Paleta exacta del rediseño (ver Rediseño barra de buffers CLI/.../README.md §2.1).
+_BG_PANEL = "#0e0d0c"
+_TEXT_PRIMARY = "#fbf9f8"
+_TEXT_SECONDARY = "#a19a97"
+_TEXT_TERTIARY = "#6d6663"
+_RULE_COLOR = "#262220"
+_ICON_COLOR = "#ec3013"
+_PROGRESS_DONE = "#ec3013"
+_PROGRESS_HEAD = "#ffd0c3"
+_AXIS_RAIL = "#26221f"
+
+_TAB_LABELS = [("lib", "1 Biblioteca"), ("queue", "2 Cola"), ("hist", "3 Historial")]
+_SHORTCUTS_TEXT = "space pausa    ] siguiente    f buscar    q salir"
 
 
 def fmt_time(seconds: Optional[float]) -> str:
@@ -41,7 +55,133 @@ def fmt_time(seconds: Optional[float]) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
-_REPEAT_ICON = {RepeatMode.OFF: "", RepeatMode.ONE: "🔂", RepeatMode.ALL: "🔁"}
+# ---------------------------------------------------------------------------
+# Fila de now-playing, barra de progreso y fila de pestañas/atajos (§2.3-2.5)
+# ---------------------------------------------------------------------------
+
+
+class NowPlayingRow(Horizontal):
+    DEFAULT_CSS = f"""
+    NowPlayingRow {{
+        height: 1;
+        background: {_BG_PANEL};
+    }}
+    NowPlayingRow > #np-left {{
+        width: 1fr;
+    }}
+    NowPlayingRow > #np-right {{
+        width: auto;
+        content-align: right middle;
+    }}
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="np-left")
+        yield Static(id="np-right")
+
+    def show_idle(self, message: str) -> None:
+        self.query_one("#np-left", Static).update(f"[{_TEXT_SECONDARY}]{escape(message)}[/]")
+        self.query_one("#np-right", Static).update("")
+
+    def show_status(self, status: PlayerStatus) -> None:
+        track = status.track
+        assert track is not None
+        icon = "▶" if status.state == PlaybackState.PLAYING else "❚❚"
+
+        left = f"[bold {_ICON_COLOR}]{icon}[/]  [bold {_TEXT_PRIMARY}]{escape(track.title)}[/]"
+        if track.uploader:
+            left += f"  [{_TEXT_TERTIARY}]—[/]  [{_TEXT_SECONDARY}]{escape(track.uploader)}[/]"
+        self.query_one("#np-left", Static).update(left)
+
+        flags = []
+        if status.shuffle:
+            flags.append("SHUFFLE")
+        if status.repeat == RepeatMode.ONE:
+            flags.append("REPEAT ONE")
+        elif status.repeat == RepeatMode.ALL:
+            flags.append("REPEAT ALL")
+        right = f"[{_TEXT_TERTIARY}]{' · '.join(flags)}[/]  " if flags else ""
+        right += f"[{_TEXT_SECONDARY}]VOL[/] [bold {_TEXT_PRIMARY}]{status.volume}[/]"
+        self.query_one("#np-right", Static).update(right)
+
+
+class ProgressRow(Static):
+    """Eje de progreso a todo el ancho, con tiempos en los extremos (§2.4)."""
+
+    DEFAULT_CSS = f"""
+    ProgressRow {{
+        height: 1;
+        width: 1fr;
+        background: {_BG_PANEL};
+    }}
+    """
+
+    position: reactive[float] = reactive(0.0)
+    duration: reactive[Optional[float]] = reactive(None)
+
+    def watch_position(self) -> None:
+        self._redraw()
+
+    def watch_duration(self) -> None:
+        self._redraw()
+
+    def on_resize(self, event) -> None:
+        self._redraw()
+
+    def _redraw(self) -> None:
+        width = self.size.width
+        if not width:
+            return
+        pos_label = fmt_time(self.position)
+        dur_label = fmt_time(self.duration)
+        rail_width = max(1, width - len(pos_label) - len(dur_label) - 2)
+
+        frac = 0.0
+        if self.duration and self.duration > 0:
+            frac = max(0.0, min(1.0, self.position / self.duration))
+        filled = int(round(frac * rail_width))
+        head = min(filled, rail_width - 1)
+
+        rail = []
+        for i in range(rail_width):
+            if i == head:
+                rail.append(f"[{_PROGRESS_HEAD}]█[/]")
+            elif i < filled:
+                rail.append(f"[{_PROGRESS_DONE}]█[/]")
+            else:
+                rail.append(f"[{_AXIS_RAIL}]█[/]")
+
+        markup = f"[{_TEXT_PRIMARY}]{pos_label}[/] {''.join(rail)} [{_TEXT_TERTIARY}]{dur_label}[/]"
+        self.update(markup)
+
+
+class TabsShortcutsRow(Horizontal):
+    DEFAULT_CSS = f"""
+    TabsShortcutsRow {{
+        height: 2;
+        border-top: solid {_RULE_COLOR};
+    }}
+    TabsShortcutsRow > #tabs-left {{
+        width: 1fr;
+    }}
+    TabsShortcutsRow > #tabs-right {{
+        width: auto;
+        content-align: right middle;
+    }}
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="tabs-left")
+        yield Static(f"[{_TEXT_TERTIARY}]{_SHORTCUTS_TEXT}[/]", id="tabs-right")
+
+    def update_active(self, active_id: str) -> None:
+        parts = []
+        for tab_id, label in _TAB_LABELS:
+            if tab_id == active_id:
+                parts.append(f"[bold {_TEXT_PRIMARY} underline]{label}[/]")
+            else:
+                parts.append(f"[{_TEXT_TERTIARY}]{label}[/]")
+        self.query_one("#tabs-left", Static).update("  ".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -391,12 +531,13 @@ class HistoryPane(Vertical):
 
 class YtAudioApp(App):
     TITLE = "ytaudio"
-    CSS = """
-    #now-playing-panel { align: center middle; height: auto; padding: 1 0; }
-    #eq { width: 40; }
-    #now-playing { height: 3; content-align: center middle; width: auto; }
-    #progress { width: 50; margin: 0; }
-    TabbedContent { height: 1fr; }
+    CSS = f"""
+    Screen {{ background: {_BG_PANEL}; }}
+    #now-playing-panel {{ height: auto; background: {_BG_PANEL}; padding: 0; }}
+    #np-spacer {{ height: 1; }}
+    NowPlayingRow, ProgressRow, TabsShortcutsRow {{ padding: 0 1; }}
+    TabbedContent {{ height: 1fr; }}
+    TabbedContent > ContentTabs {{ display: none; }}
     """
     BINDINGS = [
         Binding("space", "toggle_pause", "Pausa"),
@@ -432,12 +573,11 @@ class YtAudioApp(App):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="now-playing-panel"):
-            with Center():
-                yield EqualizerWidget(id="eq")
-            with Center():
-                yield Static("Nada reproduciéndose todavía. Presioná 'f' para buscar.", id="now-playing")
-            with Center():
-                yield ProgressBar(id="progress", show_percentage=False, show_eta=False)
+            yield EqualizerWidget(id="eq")
+            yield Static(id="np-spacer")
+            yield NowPlayingRow(id="now-playing")
+            yield ProgressRow(id="progress")
+            yield TabsShortcutsRow(id="tabs-shortcuts")
         with TabbedContent(initial="lib"):
             with TabPane("Biblioteca (1)", id="lib"):
                 yield LibraryPane()
@@ -445,13 +585,15 @@ class YtAudioApp(App):
                 yield QueuePane()
             with TabPane("Historial (3)", id="hist"):
                 yield HistoryPane()
-        yield Footer()
 
     async def on_mount(self) -> None:
         self.set_interval(0.5, self._poll_status)
         self._mpris = MprisService(self.engine)
         await self._mpris.start()  # best-effort, nunca lanza
         self.engine.add_level_listener(self._on_audio_levels)
+
+        self.query_one(NowPlayingRow).show_idle("Nada reproduciéndose todavía. Presioná 'f' para buscar.")
+        self.query_one(TabsShortcutsRow).update_active("lib")
 
         if self._initial_query:
             self.run_worker(self._play_initial_query(self._initial_query), exclusive=True)
@@ -472,11 +614,11 @@ class YtAudioApp(App):
             pass
 
     async def _play_initial_query(self, query: str) -> None:
-        self.query_one("#now-playing", Static).update(f"Resolviendo: {query}...")
+        self.query_one(NowPlayingRow).show_idle(f"Resolviendo: {query}...")
         try:
             track = await asyncio.to_thread(resolver.resolve_single, query)
         except Exception as exc:  # noqa: BLE001 - herramienta personal
-            self.query_one("#now-playing", Static).update(f"Error al resolver '{query}': {exc}")
+            self.query_one(NowPlayingRow).show_idle(f"Error al resolver '{query}': {exc}")
             return
         self.engine.play_now(track)
 
@@ -485,21 +627,18 @@ class YtAudioApp(App):
         eq = self.query_one("#eq", EqualizerWidget)
         eq.playing = status.state == PlaybackState.PLAYING
         eq.volume = status.volume
+        eq.position = status.position
+        eq.duration = status.duration
 
-        now_playing = self.query_one("#now-playing", Static)
+        now_playing = self.query_one(NowPlayingRow)
         if status.track is None:
-            now_playing.update("Nada reproduciéndose todavía. Presioná 'f' para buscar.")
+            now_playing.show_idle("Nada reproduciéndose todavía. Presioná 'f' para buscar.")
         else:
-            icon = {"playing": "▶", "paused": "⏸", "stopped": "■"}[status.state.value]
-            shuffle_icon = "🔀" if status.shuffle else ""
-            repeat_icon = _REPEAT_ICON[status.repeat]
-            now_playing.update(
-                f"{icon} {status.track.title}  [{fmt_time(status.position)}/{fmt_time(status.duration)}]"
-                f"  Vol:{status.volume}  {shuffle_icon}{repeat_icon}"
-            )
+            now_playing.show_status(status)
 
-        progress_bar = self.query_one("#progress", ProgressBar)
-        progress_bar.update(total=status.duration, progress=status.position)
+        progress_row = self.query_one(ProgressRow)
+        progress_row.position = status.position
+        progress_row.duration = status.duration
 
         try:
             await self.query_one(QueuePane).refresh_list()
@@ -550,6 +689,7 @@ class YtAudioApp(App):
 
     def action_show_tab(self, tab_id: str) -> None:
         self.query_one(TabbedContent).active = tab_id
+        self.query_one(TabsShortcutsRow).update_active(tab_id)
         focus_target = {"lib": "#lib-table", "queue": "#queue-list", "hist": "#hist-table"}.get(tab_id)
         if focus_target:
             try:
