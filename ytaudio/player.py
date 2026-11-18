@@ -305,6 +305,9 @@ class PlayerEngine:
 
         self._current_track: Optional[Track] = None
         self._pending_start_track: Optional[Track] = None
+        # Si la fuente cargada para _pending_start_track es un archivo de la
+        # caché local (True) o la URL de streaming (False).
+        self._pending_is_local: bool = False
         self._state: PlaybackState = PlaybackState.STOPPED
 
         self._volume: int = getattr(settings, "volume", 100)
@@ -517,6 +520,9 @@ class PlayerEngine:
             with self._lock:
                 self._pending_start_track = None
             return
+
+        with self._lock:
+            self._pending_is_local = source.is_local
 
         assert self._ipc is not None
         try:
@@ -738,6 +744,13 @@ class PlayerEngine:
             elif reason == "error":
                 with self._lock:
                     failed_track = self._pending_start_track
+                    failed_local = self._pending_is_local
+                if failed_track is not None and failed_local:
+                    # El archivo cacheado no se pudo abrir (corrupto o
+                    # incompleto): se descarta para que el fallback de abajo
+                    # — o la próxima reproducción — lo vuelva a descargar.
+                    _log(f"archivo en caché inválido para '{failed_track.title}', descartándolo")
+                    self._cache.purge(failed_track.id)
                 if failed_track is not None and failed_track.id not in self._fallback_attempted:
                     # Streaming directo falló ANTES de que la pista llegara a
                     # sonar (nunca llegó "file-loaded" para este intento) —
@@ -764,6 +777,7 @@ class PlayerEngine:
                 return
             with self._lock:
                 self._pending_start_track = t
+                self._pending_is_local = True
             try:
                 self._ipc.command("loadfile", str(local_path), "replace")
             except MpvIPCError as exc:

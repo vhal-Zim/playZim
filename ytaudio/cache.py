@@ -14,6 +14,8 @@ producción una vez que `resolver.py` exista.
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
 import sys
 import threading
 from datetime import datetime, timezone
@@ -36,6 +38,11 @@ class AudioCache:
         self._download_audio_fn = download_audio_fn
         self._lock = threading.Lock()
         self._index: dict = read_json(self._index_path, {})
+        # Descargas en curso: track.id -> lista de (on_done, on_error) a
+        # notificar cuando termine. Garantiza UNA sola descarga por track a
+        # la vez — dos descargas simultáneas escriben el mismo `<id>.<ext>`
+        # (y yt_dlp retoma el `.part` ajeno), dejando un archivo corrupto.
+        self._inflight: dict[str, list] = {}
 
     # -- lectura -----------------------------------------------------
 
@@ -91,29 +98,50 @@ class AudioCache:
         pasó `on_error`, también se entregan ahí (además del log) para que
         el llamador pueda reaccionar (ej. reintentar o avisar al usuario)
         en vez de quedarse esperando un `on_done` que nunca llega.
+
+        Si la pista ya está cacheada, `on_done` se llama de inmediato (en el
+        hilo del llamador). Si ya hay una descarga en curso para la misma
+        pista, no se lanza otra: los callbacks se suman a los de esa descarga.
         """
-        if self.get_local_path(track) is not None:
+        local_path = self.get_local_path(track)
+        if local_path is not None:
+            if on_done is not None:
+                self._call_quiet(on_done, track, local_path)
             return
 
+        with self._lock:
+            waiters = self._inflight.get(track.id)
+            if waiters is not None:
+                waiters.append((on_done, on_error))
+                return
+            self._inflight[track.id] = [(on_done, on_error)]
+
         def _worker() -> None:
+            local_path: Optional[Path] = None
+            error: Optional[Exception] = None
             try:
                 local_path = self._download(track)
             except Exception as exc:  # noqa: BLE001 - herramienta personal
+                error = exc
                 print(f"[ytaudio.cache] fallo al descargar '{track.title}' ({track.id}): {exc}", file=sys.stderr)
-                if on_error is not None:
-                    try:
-                        on_error(track, exc)
-                    except Exception as cb_exc:  # noqa: BLE001
-                        print(f"[ytaudio.cache] fallo en on_error para {track.id}: {cb_exc}", file=sys.stderr)
-                return
-            if on_done is not None:
-                try:
-                    on_done(track, local_path)
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[ytaudio.cache] fallo en on_done para {track.id}: {exc}", file=sys.stderr)
+
+            with self._lock:
+                waiters = self._inflight.pop(track.id, [])
+            for done_cb, error_cb in waiters:
+                if error is None and done_cb is not None:
+                    self._call_quiet(done_cb, track, local_path)
+                elif error is not None and error_cb is not None:
+                    self._call_quiet(error_cb, track, error)
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
+
+    @staticmethod
+    def _call_quiet(callback: Callable, track: Track, arg: object) -> None:
+        try:
+            callback(track, arg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ytaudio.cache] fallo en callback para {track.id}: {exc}", file=sys.stderr)
 
     def purge(self, track_id: Optional[str] = None) -> None:
         """Borra la caché. Si track_id es None, borra todo; si no, solo esa entry."""
@@ -146,6 +174,9 @@ class AudioCache:
 
         local_path_str = download_fn(track, str(self._audio_dir))
         local_path = Path(local_path_str)
+        if not self._is_playable(local_path):
+            self._unlink_quiet(local_path)
+            raise RuntimeError(f"el archivo descargado está corrupto o incompleto: {local_path}")
         size_bytes = os.path.getsize(local_path)
         entry = {
             "path": str(local_path),
@@ -161,6 +192,27 @@ class AudioCache:
     def _persist_locked(self) -> None:
         """Persiste el índice actual. Debe llamarse con self._lock tomado."""
         atomic_write_json(self._index_path, self._index)
+
+    @staticmethod
+    def _is_playable(path: Path) -> bool:
+        """Chequea con ffprobe que el archivo sea un contenedor de audio legible.
+
+        Si ffprobe no está disponible (o no responde), no bloquea: se asume
+        que el archivo está bien, como antes de existir este chequeo.
+        """
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe is None:
+            return True
+        try:
+            result = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path.resolve())],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        return result.returncode == 0
 
     @staticmethod
     def _unlink_quiet(path: Path) -> None:
